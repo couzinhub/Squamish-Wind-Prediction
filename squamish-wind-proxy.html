@@ -3,295 +3,211 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Squamish Wind Likelihood (Linear ΔT • Vertical Graph)</title>
-<style>
-  :root {
-    --bg:#0b1224; --fg:#f2f4f8; --muted:#9aa3b2; --card:#121a33; --accent:#6ee7ff;
-    --day-strong-border:#2ad27a; --day-strong-bg:rgba(42,210,122,0.08);
-    --grid:#263158;
-    /* palette for 0–25/25–50/50–75/75–100 */
-    --c-blue:#60a5fa;   /* blue-400 */
-    --c-yellow:#fde68a; /* yellow-300 */
-    --c-orange:#fb923c; /* orange-400 */
-    --c-red:#f87171;    /* red-400 */
-    --stroke-dim:#274d6b;
-  }
-  html,body{
-    margin:0; padding:0; background:var(--bg); color:var(--fg);
-    font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;
-  }
-  .wrap { max-width:980px; margin:24px auto; padding:0 16px 32px; }
-  header { margin-bottom:12px; }
-  h1 { font-size:20px; margin:0 0 6px; }
-  p { margin:0 0 8px; color:var(--muted); }
-  .tag { font-size:12px; color:var(--muted); }
-  .note { font-size:12px; color:var(--muted); margin-top:16px; }
-
-  .col { display:flex; flex-direction:column; gap:16px; align-items:center; }
-
-  .card{
-    width:500px; max-width:92vw;
-    background:var(--card); border:1px solid #1a2447; border-radius:14px; padding:14px;
-    display:flex; flex-direction:column; position:relative;
-  }
-  .card.day-strong{
-    border-color:var(--day-strong-border);
-    box-shadow: 0 0 0 2px var(--day-strong-bg);
-    background:
-      linear-gradient(0deg, var(--day-strong-bg), var(--day-strong-bg)) padding-box,
-      var(--card);
-  }
-  .ribbon{
-    position:absolute; left:0; top:0; bottom:0; width:6px;
-    background:linear-gradient(180deg, var(--day-strong-border), #1bb36a);
-    border-top-left-radius:14px; border-bottom-left-radius:14px;
-    display:none;
-  }
-  .card.day-strong .ribbon{ display:block; }
-
-  .day{ display:flex; align-items:baseline; justify-content:space-between; margin-bottom:8px; gap:12px; }
-  .big{ font-weight:700; }
-  .bar{ height:8px; background:#0f1730; border-radius:999px; overflow:hidden; margin-bottom:10px; }
-  .bar>div{ height:100%; background:var(--accent); width:0%; transition:width .4s ease; }
-
-  .graph-wrap{ margin-top:6px; }
-  .graph{ width:100%; height:120px; display:block; border-radius:10px; }
-  .gridline{ stroke:var(--grid); stroke-width:1; stroke-dasharray:3 3; }
-  .seg { fill:none; stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
-  .pt  { r:4; stroke:var(--stroke-dim); }
-  .pt-blue   { fill: var(--c-blue); }
-  .pt-yellow { fill: var(--c-yellow); stroke:#7a6d25; }
-  .pt-orange { fill: var(--c-orange); stroke:#6b3a19; }
-  .pt-red    { fill: var(--c-red); stroke:#6b1f1f; }
-
-  .err{ color:#ff8585; }
-  code{ background:#0f1730; padding:2px 6px; border-radius:6px; }
-</style>
+<title>Squamish Wind Likelihood</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@100..900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <h1>Squamish Wind Likelihood (proxy via Vancouver–Lillooet ΔT)</h1>
-    <p>
-      Hourly <strong>ΔT = Lillooet − Vancouver</strong> drives a linear likelihood:
-      <code>0% at <span id="minDeltaLabel"></span> °C</code> → <code>100% at <span id="maxDeltaLabel"></span> °C</code>.
-      Graph shows <strong>8 AM – 8 PM</strong>; daily % averages only <strong>11 AM – 6 PM</strong>.
-    </p>
-    <p class="tag">
-      Timezone: America/Vancouver • Graph hours: <span id="hoursLabel"></span> • Eval window: <span id="evalLabel"></span> •
-      Source: Open-Meteo (hourly temperature_2m) • Range: 10 days
-    </p>
-    <div id="status" class="tag"></div>
-  </header>
-
-  <div id="col" class="col"><!-- cards injected here --></div>
-
-  <div class="note">
-    Hover any point to see the hourly percentage. Colors: <span style="color:#60a5fa">blue</span> 0–25 • <span style="color:#fde68a">yellow</span> 25–50 • <span style="color:#fb923c">orange</span> 50–75 • <span style="color:#f87171">red</span> 75–100.
-  </div>
+  <h1>Squamish Strong Wind Likelihood</h1>
+  <p>Based on the temperature difference between Vancouver and Lillooet BC</p>
+  <div id="col" class="col"><!-- days injected here --></div>
 </div>
 
 <script>
 (async function(){
   // ===== Config =====
+  const HOURS = Array.from({length:13}, (_,i)=>8+i);         // 08..20 inclusive (show)
+  const EVAL_START = 11, EVAL_END = 18;                      // daily % window (11→18)
+  const MIN_DELTA = 3, MAX_DELTA = 12;                       // 3°C => 0%, 12°C => 100%
+
+  // Per-hour divisors
+  const HOUR_DIVISOR = {
+    8: 3, 9: 2, 10: 1.5, 11: 1.2,
+    12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1, 18: 1,
+    19: 1.2, 20: 1.3
+  };
+
   const TZ = 'America/Vancouver';
-  const HOURS = Array.from({length: 13}, (_,i)=> 8 + i); // 8..20 inclusive
-  const EVAL_START = 11; // 11 AM
-  const EVAL_END   = 18; // 6 PM
-  const MIN_DELTA = 5;   // °C → 0%
-  const MAX_DELTA = 12;  // °C → 100%
+  const VANCOUVER = { lat:49.2827, lon:-123.1207 };
+  const LILLOOET  = { lat:50.6869, lon:-121.9420 };
   const HORIZON_DAYS = 10;
+  
 
-  const VANCOUVER = { lat: 49.2827, lon: -123.1207 };
-  const LILLOOET  = { lat: 50.6869, lon: -121.9420 };
+  const colEl = document.getElementById('col');
 
-  // UI refs
-  const statusEl  = document.getElementById('status');
-  const colEl     = document.getElementById('col');
-  document.getElementById('hoursLabel').textContent = `${HOURS[0]}:00–${HOURS[HOURS.length-1]}:00`;
-  document.getElementById('evalLabel').textContent  = `${String(EVAL_START).padStart(2,'0')}:00–${String(EVAL_END).padStart(2,'0')}:00`;
-  document.getElementById('minDeltaLabel').textContent = MIN_DELTA;
-  document.getElementById('maxDeltaLabel').textContent = MAX_DELTA;
+  // ===== Color helpers & constants =====
+  function lerp(a,b,t){ return a + (b-a)*t; }
+  function lerpColor(c1, c2, t){
+    const r = Math.round(lerp(c1[0], c2[0], t));
+    const g = Math.round(lerp(c1[1], c2[1], t));
+    const b = Math.round(lerp(c1[2], c2[2], t));
+    return `rgb(${r},${g},${b})`;
+  }
+  const C_WHITE     = [255,255,255];
+  const C_GREEN_MAX = [ 34,197, 94]; // max green at 80%
 
-  await computeAndRender();
-
-  async function computeAndRender(){
-    statusEl.textContent = 'Fetching hourly temps…';
-    try {
-      const [van, lil] = await Promise.all([
-        fetchHourly(VANCOUVER.lat, VANCOUVER.lon, TZ, HORIZON_DAYS),
-        fetchHourly(LILLOOET.lat,  LILLOOET.lon,  TZ, HORIZON_DAYS)
-      ]);
-      const perDay = aggregateByDay(van, lil);
-      render(perDay);
-      statusEl.textContent = 'Done.';
-    } catch (e) {
-      console.error(e);
-      statusEl.innerHTML = `<span class="err">Error: ${e.message}</span>`;
+  // White until 40%; white→green ramp from 40→80; clamp at max green for 80–100
+  function cellBgForPct(p){ // p in [0..100] or null
+    if (p==null) return 'rgb(255,255,255)';
+    const x = Math.max(0, Math.min(100, p));
+    if (x <= 30) return 'rgb(255,255,255)';
+    if (x <= 80){
+      const t = (x-30)/(80-30);
+      return lerpColor(C_WHITE, C_GREEN_MAX, t);
     }
+    return `rgb(${C_GREEN_MAX[0]},${C_GREEN_MAX[1]},${C_GREEN_MAX[2]})`;
   }
 
+  // ===== Fetch & render =====
+  try{
+    const [van, lil] = await Promise.all([
+      fetchHourly(VANCOUVER.lat, VANCOUVER.lon, TZ, HORIZON_DAYS),
+      fetchHourly(LILLOOET.lat,  LILLOOET.lon,  TZ, HORIZON_DAYS)
+    ]);
+    const perDay = buildDays(van, lil);
+    render(perDay);
+  } catch(e){
+    console.error(e);
+    colEl.innerHTML = `<div style="color:#b91c1c">Error: ${e.message}</div>`;
+  }
+
+  // ----- Fetch hourly temps -----
   async function fetchHourly(lat, lon, timezone, days){
     const today = new Date();
     const start_date = toYMD(today);
     const end_date = toYMD(addDays(today, days));
     const url = new URL('https://api.open-meteo.com/v1/forecast');
     url.search = new URLSearchParams({
-      latitude: lat, longitude: lon,
-      hourly: 'temperature_2m',
+      latitude:lat, longitude:lon,
+      hourly:'temperature_2m',
       timezone, start_date, end_date
     }).toString();
     const r = await fetch(url);
-    if (!r.ok) throw new Error(`Open-Meteo ${r.status}`);
-    const json = await r.json();
-    const res = {};
-    const t = json.hourly.time, v = json.hourly.temperature_2m;
-    for (let i=0;i<t.length;i++) res[t[i]] = v[i];
-    return res;
+    if(!r.ok) throw new Error(`Open-Meteo ${r.status}`);
+    const j = await r.json();
+    const out = {};
+    const t = j.hourly.time, v = j.hourly.temperature_2m;
+    for(let i=0;i<t.length;i++) out[t[i]] = v[i];
+    return out;
   }
-
-  function addDays(date, days){ const d=new Date(date); d.setDate(d.getDate()+days); return d; }
+  function addDays(d, n){ const x=new Date(d); x.setDate(x.getDate()+n); return x; }
   function toYMD(d){
     return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year:'numeric', month:'2-digit', day:'2-digit' })
       .format(d).replaceAll('/','-');
   }
 
-  // Linear probability per hour; clamp [0,1]
-  function probFromDelta(delta){
-    if (delta==null||Number.isNaN(delta)) return null;
-    const x = (delta - MIN_DELTA) / (MAX_DELTA - MIN_DELTA);
-    return Math.max(0, Math.min(1, x));
+  // ----- Model: ΔT → % -----
+  function pctFromDelta(delta){
+    if (delta==null || Number.isNaN(delta)) return null;
+    if (delta <= MIN_DELTA) return 0;
+    if (delta >= MAX_DELTA) return 100;
+    return Math.round(((delta - MIN_DELTA) / (MAX_DELTA - MIN_DELTA)) * 100);
   }
 
-  // Color bin for p in [0,1]
-  function colorForProb(p){
-    if (p == null) return 'var(--c-blue)'; // treat missing as low/blue
-    if (p < 0.25) return 'var(--c-blue)';
-    if (p < 0.50) return 'var(--c-yellow)';
-    if (p < 0.75) return 'var(--c-orange)';
-    return 'var(--c-red)';
-  }
-  function pointClassForProb(p){
-    if (p == null) return 'pt pt-blue';
-    if (p < 0.25) return 'pt pt-blue';
-    if (p < 0.50) return 'pt pt-yellow';
-    if (p < 0.75) return 'pt pt-orange';
-    return 'pt pt-red';
+  // Day badge color by daily average (computed on 11→18)
+  function badgeClass(pct){
+    if (pct==null) return 'gray';
+    if (pct < 50)  return 'gray';
+    if (pct < 65)  return 'yellow';
+    if (pct < 80)  return 'orange';
+    return 'red';
   }
 
-  function aggregateByDay(van, lil){
+  // ----- Build per-day structures -----
+  function buildDays(van, lil){
     const dates = new Set([...Object.keys(van), ...Object.keys(lil)].map(s=>s.slice(0,10)));
-    const sortedDates = [...dates].sort();
+    const sorted = [...dates].sort();
     const today = toYMD(new Date());
-    const nextN = sortedDates.filter(d=>d>=today).slice(0, HORIZON_DAYS);
+    const nextN = sorted.filter(d=>d>=today).slice(0, HORIZON_DAYS);
 
     return nextN.map(dateStr=>{
-      const rows=[]; const probsForEval=[];
-      for(const h of HOURS){
-        const stamp=`${dateStr}T${String(h).padStart(2,'0')}:00`;
-        const tv=van[stamp], tl=lil[stamp];
-        const delta=(typeof tv==='number'&&typeof tl==='number')?(tl-tv):null; // Lillooet − Vancouver
-        const p=probFromDelta(delta);
-        rows.push({hour:`${String(h).padStart(2,'0')}:00`,prob:p});
-        if (h >= EVAL_START && h <= EVAL_END && p != null) probsForEval.push(p);
+      const cells = [];            // 13 hours
+      const evalPcts = [];         // for 11..18 daily%
+      for (const h of HOURS){
+        const ts = `${dateStr}T${String(h).padStart(2,'0')}:00`;
+        const tv = van[ts], tl = lil[ts];
+        const rawDelta = (typeof tv==='number' && typeof tl==='number') ? (tl - tv) : null; // Lillooet − Vancouver
+
+        // Apply hour-based divisor to the delta BEFORE mapping to %
+        const divisor = HOUR_DIVISOR[h] ?? 1;
+        const adjustedDelta = (rawDelta==null) ? null : (rawDelta / divisor);
+
+        const pct = pctFromDelta(adjustedDelta);
+        cells.push({ hour:h, pct, delta:rawDelta, tv, tl }); // keep raw temps + delta for tooltip
+
+        if (h>=EVAL_START && h<=EVAL_END && pct!=null) evalPcts.push(pct);
       }
-      const probability=probsForEval.length?(probsForEval.reduce((a,b)=>a+b,0)/probsForEval.length):null;
-      return {dateStr,rows,probability};
+      const dayPct = evalPcts.length ? Math.round(evalPcts.reduce((a,b)=>a+b,0)/evalPcts.length) : null;
+      return { dateStr, cells, dayPct };
     });
   }
 
-  function render(perDay){
+  // ----- Render -----
+  function render(days){
     colEl.textContent = '';
     const frag = document.createDocumentFragment();
 
-    perDay.forEach(day=>{
-      const pctNum=day.probability==null?0:Math.round(day.probability*100);
-      const pctTxt=day.probability==null?'—':`${pctNum}%`;
+    days.forEach((day, idx)=>{
+      const card = document.createElement('div');
+      card.className = 'card';
 
-      const card=document.createElement('div');
-      card.className='card' + (pctNum>75 ? ' day-strong' : '');
-      card.innerHTML=`
-        <span class="ribbon" aria-hidden="true"></span>
-        <div class="day">
-          <div class="big">${formatDay(day.dateStr)}</div>
-          <div class="tag">${pctTxt}</div>
-        </div>
-        <div class="bar"><div style="width:${pctNum}%"></div></div>
-        <div class="graph-wrap">
-          ${svgGraph(day.rows)}
-        </div>
+      const top = document.createElement('div');
+      top.className = 'top';
+      const dayLabel = (idx === 0) ? 'Today'
+                      : (idx === 1) ? 'Tomorrow'
+                      : formatDay(day.dateStr);
+      top.innerHTML = `
+        <div class="day">${dayLabel}</div>
+        <div class="badge ${badgeClass(day.dayPct)}">${day.dayPct==null?'—':(day.dayPct+'%')}</div>
       `;
+
+      const cells = document.createElement('div');
+      cells.className = 'cells';
+      day.cells.forEach(c=>{
+        const div = document.createElement('div');
+        const pctTxt = c.pct==null ? '—' : `${c.pct}%`;
+        div.className = 'cell';
+        div.style.background = cellBgForPct(c.pct);
+        // custom tooltip (small bubble) with raw ΔT
+        const tip = `Vancouver: ${fmtTemp(c.tv)}
+Lillooet: ${fmtTemp(c.tl)}
+Difference: ${fmtDelta(c.delta)}`;
+        div.setAttribute('data-tip', tip);
+        div.innerHTML = `<small>${pctTxt}</small>`;
+        cells.appendChild(div);
+      });
+
+      const hrs = document.createElement('div');
+      hrs.className = 'hours';
+      day.cells.forEach(c=>{
+        hrs.innerHTML += `<span>${hourLabel(c.hour)}</span>`;
+      });
+
+      card.appendChild(top);
+      card.appendChild(cells);
+      card.appendChild(hrs);
       frag.appendChild(card);
     });
+
     colEl.appendChild(frag);
   }
 
-  // Build a colored, smooth SVG curve; segments colored by bin; points colored by bin.
-  function svgGraph(rows){
-    const W = 472;        // inner width for ~500px card
-    const H = 100;        // graph height
-    const P = 8;          // padding
-    const n = rows.length || 0;
-    if (!n) return `<div class="tag">No hourly data</div>`;
-
-    // x positions across [P, W-P]
-    const step = (W - 2*P) / (n - 1);
-    const xs = rows.map((_,i)=> P + i*step);
-    // y: invert so 0 at bottom, 1 at top
-    const yOf = (p)=> P + (H - 2*P) * (1 - (p ?? 0));
-    const ys = rows.map(r => yOf(r.prob ?? 0));
-
-    // Gridlines (25/50/75%)
-    const g25 = yOf(0.25), g50 = yOf(0.50), g75 = yOf(0.75);
-    const grid = `
-      <line class="gridline" x1="${P}" y1="${g25}" x2="${W-P}" y2="${g25}"></line>
-      <line class="gridline" x1="${P}" y1="${g50}" x2="${W-P}" y2="${g50}"></line>
-      <line class="gridline" x1="${P}" y1="${g75}" x2="${W-P}" y2="${g75}"></line>
-    `;
-
-    // Segment-wise Catmull–Rom → cubic Bézier so we can color each segment
-    const segs = [];
-    for (let i = 0; i < n - 1; i++) {
-      const p0 = [ xs[Math.max(i-1,0)],     ys[Math.max(i-1,0)]     ];
-      const p1 = [ xs[i],                   ys[i]                   ];
-      const p2 = [ xs[i+1],                 ys[i+1]                 ];
-      const p3 = [ xs[Math.min(i+2,n-1)],   ys[Math.min(i+2,n-1)]   ];
-
-      const c1x = p1[0] + (p2[0] - p0[0]) / 6;
-      const c1y = p1[1] + (p2[1] - p0[1]) / 6;
-      const c2x = p2[0] - (p3[0] - p1[0]) / 6;
-      const c2y = p2[1] - (p3[1] - p1[1]) / 6;
-
-      const d = `M ${p1[0]} ${p1[1]} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2[0]} ${p2[1]}`;
-      const pAvg = ((rows[i].prob ?? 0) + (rows[i+1].prob ?? 0)) / 2;
-      const color = colorForProb(pAvg);
-      segs.push(`<path class="seg" d="${d}" stroke="${color}"></path>`);
-    }
-
-    // Points (hover shows just the percentage)
-    const points = rows.map((r,i)=>{
-      const cls = pointClassForProb(r.prob);
-      const cx = xs[i], cy = ys[i];
-      const pct = (r.prob==null) ? '—' : (Math.round(r.prob*100)+'%');
-      return `<circle class="${cls}" cx="${cx}" cy="${cy}"><title>${pct}</title></circle>`;
-    }).join('');
-
-    // hour labels
-    const labels = rows.map((r)=>`<span>${r.hour}</span>`).join('');
-
-    return `
-      <svg class="graph" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="Hourly likelihood line chart">
-        ${grid}
-        ${segs.join('')}
-        ${points}
-      </svg>
-      <div class="xlabels" style="display:flex;justify-content:space-between;margin-top:6px;font-size:12px;color:var(--muted);padding:0 4px;">
-        ${labels}
-      </div>
-    `;
+  // ----- Utils -----
+  function hourLabel(h){
+    const suffix = h >= 12 ? 'PM' : 'AM';
+    const hr12 = ((h + 11) % 12) + 1;
+    return `${hr12} ${suffix}`;
   }
+  function formatDay(ymd){
+    const [y,m,d] = ymd.split('-').map(Number);
+    return new Date(y, m-1, d).toLocaleDateString(undefined, { weekday:'long', month:'short', day:'numeric' });
+  }
+  function fmtTemp(x){ return (x==null) ? '—' : `${x.toFixed(1)}°C`; }
+  function fmtDelta(x){ return (x==null) ? '—' : `${x.toFixed(1)}°C`; }
 
-  function formatDay(ymd){ const [y,m,d]=ymd.split('-').map(Number); return new Date(y,m-1,d).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'}); }
 })();
 </script>
 </body>

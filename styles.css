@@ -1,0 +1,178 @@
+html,
+body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Lexend", sans-serif;
+    font-optical-sizing: auto;
+    font-style: normal;
+    font-size: 16px;
+    line-height: 1.45;
+}
+
+:root {
+    /* Light theme, high legibility outdoors */
+    --bg: #ffffff;
+    --fg: #0b1224;
+    --muted: #4b5563;
+    --card: #ffffff;
+    --border: #d4d4d4;
+
+    /* Day % label colors */
+    --gray: #7e7e7e;
+    --yellow: #bfc200;
+    --orange: #f97316;
+    --red: #ef4444;
+
+    /* Tooltip colors */
+    --tip-bg: rgba(0,0,0,0.88);
+    --tip-fg: #ffffff;
+}
+
+.wrap {
+    max-width: 960px;
+    margin: 20px auto;
+    padding: 0 12px 28px;
+}
+
+h1 {
+    font-size: 32px;
+    margin: 48px 0 12px;
+    font-weight: 400;
+    color: #0f172a;
+    text-align: center;
+}
+p {
+    font-size: 18px;
+    text-align: center;
+}
+
+/* Column of day cards */
+.col {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    align-items: center;
+}
+
+/* Each day row */
+.card {
+    width: 100%;
+    background: var(--card);
+    padding: 24px;
+}
+
+.top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.day {
+    font-weight: 700;
+    font-size: 24px;
+}
+
+/* Day % badge (color by value) */
+.badge {
+    font-weight: 700;
+    font-size: 24px;
+    padding: 4px 8px;
+    background: #fafafa;
+    min-width: 56px;
+    text-align: center;
+}
+
+.badge.gray   { color: var(--gray); }
+.badge.yellow { color: var(--yellow); }
+.badge.orange { color: var(--orange); }
+.badge.red    { color: var(--red); }
+
+/* Single-row grid: 8 → 20 (13 cells) */
+.cells {
+    display: grid;
+    grid-template-columns: repeat(13, 1fr);
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    /* NOTE: allow tooltips to overflow; this was clipping them before */
+    overflow: visible;
+}
+.cells > .cell:first-child {
+    border-radius: 7px 0 0 7px;
+}
+
+.cells > .cell:last-child {
+    border-radius: 0 7px 7px 0;
+    border-right: 0;
+}
+
+.cell {
+    position: relative; /* for tooltip */
+    height: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: #0b1224; /* dark text for sunny readability */
+    user-select: none;
+    box-shadow: -1px 0 0 0 rgb(0 0 255 / 0.1);
+}
+
+.cell small { font-weight: 600; }
+
+/* Custom tooltip on hover using data-tip */
+.cell::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%) translateY(-6px);
+    background: var(--tip-bg);
+    color: var(--tip-fg);
+    font-size: 12px;
+    padding: 4px 6px;
+    border-radius: 6px;
+    white-space: pre;      /* allow \n line breaks */
+    text-align: left;      /* easier to scan multiline values */
+    box-shadow: 0 2px 6px rgba(0,0,0,.15);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 10;
+    transition: opacity .15s ease, transform .15s ease;
+}
+
+.cell::before {
+    content: "";
+    position: absolute;
+    bottom: calc(100% - 1px);
+    left: 50%;
+    transform: translateX(-50%);
+    border-width: 6px;
+    border-style: solid;
+    border-color: var(--tip-bg) transparent transparent transparent;
+    opacity: 0;
+    z-index: 10;
+    transition: opacity .15s ease;
+}
+
+@media (hover:hover){
+  .cell:hover::after { opacity: 1; transform: translateX(-50%) translateY(-8px); }
+  .cell:hover::before { opacity: 1; }
+}
+
+/* Hour labels */
+.hours {
+    display: grid;
+    grid-template-columns: repeat(13, 1fr);
+    gap: 6px;
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.hours span { text-align: center; }
