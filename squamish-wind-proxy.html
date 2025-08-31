@@ -168,15 +168,14 @@
       cells.className = 'cells';
       day.cells.forEach(c=>{
         const div = document.createElement('div');
-        const pctTxt = c.pct==null ? '—' : `${c.pct}%`;
+        const deltaTxt = (c.delta==null) ? '—' : `${Math.round(c.delta)}°`;
         div.className = 'cell';
         div.style.background = cellBgForPct(c.pct);
-        // custom tooltip (small bubble) with raw ΔT
+        // custom tooltip
         const tip = `Vancouver: ${fmtTemp(c.tv)}
-Lillooet: ${fmtTemp(c.tl)}
-Difference: ${fmtDelta(c.delta)}`;
+Lillooet: ${fmtTemp(c.tl)}`;
         div.setAttribute('data-tip', tip);
-        div.innerHTML = `<small>${pctTxt}</small>`;
+        div.innerHTML = `<small>${deltaTxt}</small>`;
         cells.appendChild(div);
       });
 
@@ -206,7 +205,6 @@ Difference: ${fmtDelta(c.delta)}`;
     return new Date(y, m-1, d).toLocaleDateString(undefined, { weekday:'long', month:'short', day:'numeric' });
   }
   function fmtTemp(x){ return (x==null) ? '—' : `${x.toFixed(1)}°C`; }
-  function fmtDelta(x){ return (x==null) ? '—' : `${x.toFixed(1)}°C`; }
 
 })();
 </script>
