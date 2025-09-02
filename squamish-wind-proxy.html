@@ -49,16 +49,20 @@
     return `rgb(${r},${g},${b})`;
   }
   const C_WHITE     = [255,255,255];
-  const C_GREEN_MAX = [ 34,197, 94]; // max green at 80%
+  const C_YELLOW    = [255,234,123]; // (yellow)
+  const C_GREEN_MAX = [ 34,197, 94]; // (green)
 
-  // White until 30%; white→green ramp from 40→80; clamp at max green for 80–100
-  function cellBgForPct(p){ // p in [0..100] or null
-    if (p==null) return 'rgb(255,255,255)';
-    const x = Math.max(0, Math.min(100, p));
-    if (x <= 30) return 'rgb(255,255,255)';
-    if (x <= 80){
-      const t = (x-30)/(80-30);
-      return lerpColor(C_WHITE, C_GREEN_MAX, t);
+  // Color by adjusted ΔT (°C): 0–5 white, 5–10 white→yellow, 10–15 yellow→green, ≥15 green
+  function cellBgForDelta(d){
+    if (d==null || !isFinite(d)) return 'rgb(255,255,255)';
+    if (d <= 5) return 'rgb(255,255,255)';
+    if (d <= 10){
+      const t = (d - 5) / 5;           // 0..1
+      return lerpColor(C_WHITE, C_YELLOW, t);
+    }
+    if (d <= 15){
+      const t = (d - 10) / 5;          // 0..1
+      return lerpColor(C_YELLOW, C_GREEN_MAX, t);
     }
     return `rgb(${C_GREEN_MAX[0]},${C_GREEN_MAX[1]},${C_GREEN_MAX[2]})`;
   }
@@ -140,7 +144,7 @@
         const adjustedDelta = (rawDelta==null) ? null : (rawDelta / divisor);
 
         const pct = pctFromDelta(adjustedDelta);
-        cells.push({ hour:h, pct, delta:rawDelta, tv, tl }); // keep raw temps + delta for tooltip
+        cells.push({ hour:h, pct, delta:rawDelta, adj:adjustedDelta, tv, tl }); // add adjusted ΔT for coloring
 
         if (h>=EVAL_START && h<=EVAL_END && pct!=null) evalPcts.push(pct);
       }
@@ -156,6 +160,7 @@
   function render(days){
     colEl.textContent = '';
     const frag = document.createDocumentFragment();
+    const todayStr = toYMD(new Date());
 
     days.forEach((day, idx)=>{
       const card = document.createElement('div');
@@ -166,14 +171,19 @@
       const dayLabel = (idx === 0) ? 'Today'
                       : (idx === 1) ? 'Tomorrow'
                       : formatDay(day.dateStr);
+      const isToday   = (day.dateStr === todayStr);
+      const smokeWarn = (isToday && day.pm25 != null && day.pm25 > 10);
+      const displayPct = (day.dayPct == null) ? null
+                        : Math.max(0, Math.round(day.dayPct / (smokeWarn ? 3 : 1)));
       top.innerHTML = `
-         <div class="day">
+        <div class="day">
             ${dayLabel}
             ${day.wmo!=null ? `<span class="wx" title="${weatherNameForWMO(day.wmo)}">${iconForWMO(day.wmo)}</span>` : ''}
-            ${(day.pm25!=null && day.pm25 > 10)
-              ? `<span class="smoke-warn" title="PM2.5 ~ ${day.pm25.toFixed(1)} µg/m³">⚠️ Possible fire smoke</span>`
+            ${smokeWarn
+              ? `<span class="smoke-warn" title="PM2.5 ~ ${day.pm25.toFixed(1)} µg/m³">🔥 fire smoke</span>`
               : ''}
-          </div>
+         </div>
+         <div class="badge ${badgeClass(displayPct)}">${displayPct==null ? '—' : (displayPct + '%')}</div>
        `;
 
       const cells = document.createElement('div');
@@ -182,7 +192,7 @@
         const div = document.createElement('div');
         const deltaTxt = (c.delta==null) ? '—' : `${Math.round(c.delta)}°`;
         div.className = 'cell';
-        div.style.background = cellBgForPct(c.pct);
+        div.style.background = cellBgForDelta(c.adj);
         // custom tooltip
         const tip = `Vancouver: ${fmtTemp(c.tv)}
 Lillooet: ${fmtTemp(c.tl)}`;

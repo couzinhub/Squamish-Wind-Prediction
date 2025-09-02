@@ -89,7 +89,10 @@ p {
 .day .smoke-warn{
   margin-left: 10px;
   font-size: 14px;
-  color: #b45309;       /* amber-700-ish */
+  color: #AD0000;
+  background-color: #FFE2DA;
+  border-radius: 4px;
+  padding: 4px 8px 4px 2px;
   font-weight: 700;
   white-space: nowrap;  /* keep it on one line */
 }
@@ -142,7 +145,7 @@ p {
     box-shadow: -1px 0 0 0 rgb(0 0 255 / 0.1);
 }
 
-.cell small { font-weight: 600; }
+.cell small { font-weight: 600; font-size: 12px;}
 
 /* Custom tooltip on hover using data-tip */
 .cell::after {
