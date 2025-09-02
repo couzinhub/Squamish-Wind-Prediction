@@ -32,8 +32,10 @@
 
   const TZ = 'America/Vancouver';
   const VANCOUVER = { lat:49.2827, lon:-123.1207 };
+  const SQUAMISH  = { lat:49.7016, lon:-123.1550 }; // for daily weather + air quality
   const LILLOOET  = { lat:50.6869, lon:-121.9420 };
   const HORIZON_DAYS = 10;
+  const AQ_FORECAST_LIMIT_DAYS = 10; // Open-Meteo AQ forecast horizon
   
 
   const colEl = document.getElementById('col');
@@ -63,11 +65,13 @@
 
   // ===== Fetch & render =====
   try{
-    const [van, lil] = await Promise.all([
+    const [van, lil, squWx, squAQ] = await Promise.all([
       fetchHourly(VANCOUVER.lat, VANCOUVER.lon, TZ, HORIZON_DAYS),
-      fetchHourly(LILLOOET.lat,  LILLOOET.lon,  TZ, HORIZON_DAYS)
+      fetchHourly(LILLOOET.lat,  LILLOOET.lon,  TZ, HORIZON_DAYS),
+      fetchSquamishDaily(TZ, HORIZON_DAYS),        // date -> WMO weather code
+      fetchSquamishAQ(TZ, HORIZON_DAYS)            // date -> pm2.5 (µg/m³) daytime max
     ]);
-    const perDay = buildDays(van, lil);
+    const perDay = buildDays(van, lil, squWx, squAQ);
     render(perDay);
   } catch(e){
     console.error(e);
@@ -117,7 +121,7 @@
   }
 
   // ----- Build per-day structures -----
-  function buildDays(van, lil){
+  function buildDays(van, lil, squWx, squAQ){
     const dates = new Set([...Object.keys(van), ...Object.keys(lil)].map(s=>s.slice(0,10)));
     const sorted = [...dates].sort();
     const today = toYMD(new Date());
@@ -141,7 +145,10 @@
         if (h>=EVAL_START && h<=EVAL_END && pct!=null) evalPcts.push(pct);
       }
       const dayPct = evalPcts.length ? Math.round(evalPcts.reduce((a,b)=>a+b,0)/evalPcts.length) : null;
-      return { dateStr, cells, dayPct };
+      const wmo  = squWx?.[dateStr] ?? null;
+      const pm25 = squAQ?.[dateStr] ?? null;
+      const smokeRisk = (pm25==null) ? null : smokeRiskFromPM25(pm25); // %
+      return { dateStr, cells, dayPct, wmo, pm25, smokeRisk };
     });
   }
 
@@ -160,9 +167,14 @@
                       : (idx === 1) ? 'Tomorrow'
                       : formatDay(day.dateStr);
       top.innerHTML = `
-        <div class="day">${dayLabel}</div>
-        <div class="badge ${badgeClass(day.dayPct)}">${day.dayPct==null?'—':(day.dayPct+'%')}</div>
-      `;
+         <div class="day">
+            ${dayLabel}
+            ${day.wmo!=null ? `<span class="wx" title="${weatherNameForWMO(day.wmo)}">${iconForWMO(day.wmo)}</span>` : ''}
+            ${(day.pm25!=null && day.pm25 > 10)
+              ? `<span class="smoke-warn" title="PM2.5 ~ ${day.pm25.toFixed(1)} µg/m³">⚠️ Possible fire smoke</span>`
+              : ''}
+          </div>
+       `;
 
       const cells = document.createElement('div');
       cells.className = 'cells';
@@ -205,6 +217,100 @@ Lillooet: ${fmtTemp(c.tl)}`;
     return new Date(y, m-1, d).toLocaleDateString(undefined, { weekday:'long', month:'short', day:'numeric' });
   }
   function fmtTemp(x){ return (x==null) ? '—' : `${x.toFixed(1)}°C`; }
+
+  async function fetchSquamishDaily(timezone, days){
+  const start_date = toYMD(new Date());
+  const end_date   = toYMD(addDays(new Date(), Math.min(days, AQ_FORECAST_LIMIT_DAYS)));
+  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  url.search = new URLSearchParams({
+    latitude: SQUAMISH.lat,
+    longitude: SQUAMISH.lon,
+    daily: 'weathercode',
+    timezone, start_date, end_date
+  }).toString();
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(`Open-Meteo daily ${r.status}`);
+  const j = await r.json();
+  const out = {};
+  const t = j.daily.time, w = j.daily.weathercode;
+  for(let i=0;i<t.length;i++) out[t[i]] = w[i];
+  return out; // { 'YYYY-MM-DD': wmoCode }
+}
+
+async function fetchSquamishAQ(timezone, days){
+  const base = 'https://air-quality-api.open-meteo.com/v1/air-quality';
+  const common = {
+    latitude: SQUAMISH.lat,
+    longitude: SQUAMISH.lon,
+    hourly: 'pm2_5',
+    timezone
+  };
+
+  // Try forecast_days from 5 down to 1 until the API accepts it.
+  for (const fd of [5,4,3,2,1]) {
+    const url = new URL(base);
+    url.search = new URLSearchParams({ ...common, forecast_days: Math.min(days, fd) }).toString();
+    const r = await fetch(url);
+    if (r.ok) {
+      const j = await r.json();
+      const out = {}; // date -> daily max pm2.5
+      const t = j.hourly?.time || [];
+      const v = j.hourly?.pm2_5 || [];
+      for (let i=0;i<t.length;i++){
+        const dateStr = t[i].slice(0,10);
+        const val = v[i];
+        if (typeof val === 'number'){
+          out[dateStr] = Math.max(out[dateStr] ?? -Infinity, val);
+        }
+      }
+      console.log('AQ pm2.5 daily max map:', out);
+      return out;
+    }
+    if (r.status !== 400) {
+      // Non-parameter error → surface it
+      throw new Error(`Open-Meteo AQ ${r.status}`);
+    }
+  }
+
+  console.warn('Open-Meteo AQ: all forecast_days attempts failed; returning empty AQ data.');
+  return {};
+}
+
+
+function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function smokeRiskFromPM25(pm){ // simple linear 0→150 µg/m³ → 0–100%
+  if (pm==null || !isFinite(pm)) return null;
+  const p = clamp01(pm / 150);
+  return Math.round(p * 100);
+}
+
+// WMO → label + emoji (compact set)
+function weatherNameForWMO(code){
+  if (code==null) return '—';
+  const c = Number(code);
+  if (c===0) return 'Clear';
+  if ([1,2].includes(c)) return 'Partly cloudy';
+  if (c===3) return 'Overcast';
+  if ([45,48].includes(c)) return 'Fog';
+  if ([51,53,55,56,57,61,63,65,66,67].includes(c)) return 'Rain';
+  if ([71,73,75,77].includes(c)) return 'Snow';
+  if ([80,81,82].includes(c)) return 'Showers';
+  if ([95,96,99].includes(c)) return 'Thunderstorm';
+  return 'Mixed';
+}
+function iconForWMO(code){
+  if (code==null) return '·';
+  const c = Number(code);
+  if (c===0) return '☀️';
+  if ([1,2].includes(c)) return '🌤️';
+  if (c===3) return '☁️';
+  if ([45,48].includes(c)) return '🌫️';
+  if ([51,53,55,56,57,61,63,65,66,67,80,81,82].includes(c)) return '🌧️';
+  if ([71,73,75,77].includes(c)) return '🌨️';
+  if ([95,96,99].includes(c)) return '⛈️';
+  return '🌡️';
+}
+
 
 })();
 </script>

@@ -79,6 +79,23 @@ p {
     font-size: 24px;
 }
 
+.day .wx,
+.day .smoke {
+  margin-left: 8px;
+  font-size: 22px;
+  line-height: 1;
+  vertical-align: -2px;
+}
+.day .smoke-warn{
+  margin-left: 10px;
+  font-size: 14px;
+  color: #b45309;       /* amber-700-ish */
+  font-weight: 700;
+  white-space: nowrap;  /* keep it on one line */
+}
+
+
+
 /* Day % badge (color by value) */
 .badge {
     font-weight: 700;
