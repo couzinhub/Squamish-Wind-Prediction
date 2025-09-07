@@ -52,16 +52,16 @@
   const C_YELLOW    = [255,234,123]; // (yellow)
   const C_GREEN_MAX = [ 34,197, 94]; // (green)
 
-  // Color by adjusted ΔT (°C): 0–5 white, 5–10 white→yellow, 10–15 yellow→green, ≥15 green
+  // Color by adjusted ΔT (°C): 0–3 white, 3–7 white→yellow, 7–10 yellow→green, ≥10 green
   function cellBgForDelta(d){
     if (d==null || !isFinite(d)) return 'rgb(255,255,255)';
-    if (d <= 5) return 'rgb(255,255,255)';
-    if (d <= 10){
-      const t = (d - 5) / 5;           // 0..1
+    if (d <= 4) return 'rgb(255,255,255)';
+    if (d <= 8){
+      const t = (d - 4) / 4;            // 0..1 across 3→7
       return lerpColor(C_WHITE, C_YELLOW, t);
     }
-    if (d <= 15){
-      const t = (d - 10) / 5;          // 0..1
+    if (d <= 12){
+      const t = (d - 8) / 3;            // 0..1 across 7→10
       return lerpColor(C_YELLOW, C_GREEN_MAX, t);
     }
     return `rgb(${C_GREEN_MAX[0]},${C_GREEN_MAX[1]},${C_GREEN_MAX[2]})`;
@@ -172,7 +172,7 @@
                       : (idx === 1) ? 'Tomorrow'
                       : formatDay(day.dateStr);
       const isToday   = (day.dateStr === todayStr);
-      const smokeWarn = (isToday && day.pm25 != null && day.pm25 > 10);
+      const smokeWarn = (isToday && day.pm25 != null && day.pm25 >= 30);
       const displayPct = (day.dayPct == null) ? null
                         : Math.max(0, Math.round(day.dayPct / (smokeWarn ? 3 : 1)));
       top.innerHTML = `
