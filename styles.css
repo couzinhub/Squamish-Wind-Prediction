@@ -198,3 +198,48 @@ p {
 }
 
 .hours span { text-align: center; }
+
+
+/* same tooltip behavior for the weather emoji */
+.day .wx {
+  position: relative;
+}
+
+.day .wx::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(-6px);
+  background: var(--tip-bg);
+  color: var(--tip-fg);
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  white-space: pre;       /* allow line breaks if you add them */
+  text-align: left;
+  box-shadow: 0 2px 6px rgba(0,0,0,.15);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 10;
+  transition: opacity .15s ease, transform .15s ease;
+}
+
+.day .wx::before {
+  content: "";
+  position: absolute;
+  bottom: calc(100% - 1px);
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 6px;
+  border-style: solid;
+  border-color: var(--tip-bg) transparent transparent transparent;
+  opacity: 0;
+  z-index: 10;
+  transition: opacity .15s ease;
+}
+
+@media (hover:hover){
+  .day .wx:hover::after { opacity: 1; transform: translateX(-50%) translateY(-8px); }
+  .day .wx:hover::before { opacity: 1; }
+}
