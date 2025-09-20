@@ -8,6 +8,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Lexend:wght@100..900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
+  <script src="droids.js"></script>
+
 </head>
 <body>
 <div class="wrap">
@@ -34,7 +36,8 @@
   const VANCOUVER = { lat:49.2827, lon:-123.1207 };
   const SQUAMISH  = { lat:49.7016, lon:-123.1550 }; // for daily weather + air quality
   const LILLOOET  = { lat:50.6869, lon:-121.9420 };
-  const HORIZON_DAYS = 10;
+  const HORIZON_DAYS = 8;
+
   const AQ_FORECAST_LIMIT_DAYS = 10; // Open-Meteo AQ forecast horizon
   
 
@@ -72,9 +75,10 @@
   // ===== Fetch & render =====
   try{
     const [van, lil, squWx, squAQ, squCC] = await Promise.all([
-      fetchHourly(VANCOUVER.lat, VANCOUVER.lon, TZ, HORIZON_DAYS),
-      fetchHourly(LILLOOET.lat,  LILLOOET.lon,  TZ, HORIZON_DAYS),
-      fetchSquamishDaily(TZ, HORIZON_DAYS),        // date -> WMO weather code
+      fetchHourlyAveraged(VANCOUVER.lat, VANCOUVER.lon, TZ, HORIZON_DAYS),
+      fetchHourlyAveraged(LILLOOET.lat,  LILLOOET.lon,  TZ, HORIZON_DAYS),
+
+    fetchSquamishDaily(TZ, HORIZON_DAYS),        // date -> WMO weather code
       fetchSquamishAQ(TZ, HORIZON_DAYS),            // date -> pm2.5 (µg/m³) daytime max
       fetchSquamishCloudCover(TZ, HORIZON_DAYS)    // date -> avg cloudcover% (11–18)
     ]);
@@ -86,22 +90,39 @@
   }
 
   // ----- Fetch hourly temps -----
-  async function fetchHourly(lat, lon, timezone, days){
-    const today = new Date();
-    const start_date = toYMD(today);
-    const end_date = toYMD(addDays(today, days));
-    const url = new URL('https://api.open-meteo.com/v1/forecast');
-    url.search = new URLSearchParams({
-      latitude:lat, longitude:lon,
-      hourly:'temperature_2m',
-      timezone, start_date, end_date
-    }).toString();
-    const r = await fetch(url);
-    if(!r.ok) throw new Error(`Open-Meteo ${r.status}`);
-    const j = await r.json();
+  // Build the exact local timestamps we care about: today..+days, 08..20 local
+  function requestedLocalStamps(timezone, days){
+    const want = [];
+    const start = new Date(); // now
+    for(let d=0; d<days; d++){
+      const day = addDays(start, d);
+      const ymd = toYMD(day);
+      for (let h=8; h<=20; h++){
+        const s = `${ymd}T${String(h).padStart(2,'0')}:00`;
+        want.push(s);
+      }
+    }
+    return want; // array of 'YYYY-MM-DDTHH:00' in local tz
+  }
+
+  async function fetchHourlyAveraged(lat, lon, timezone, days){
+    const targets = requestedLocalStamps(timezone, days);
+    // Kick all sources in parallel and fail-soft (empty maps if one fails)
+    const [om, metno, owm] = await Promise.all([
+      withTimeout(fetchOM(lat, lon, timezone, days).catch(()=> ({}))),
+      withTimeout(fetchMetNo(lat, lon, timezone, days).catch(()=> ({}))),
+      withTimeout(fetchOWM(lat, lon, timezone, days).catch(()=> ({}))),
+    ]);
+    // Average available temps per timestamp
     const out = {};
-    const t = j.hourly.time, v = j.hourly.temperature_2m;
-    for(let i=0;i<t.length;i++) out[t[i]] = v[i];
+    for (const ts of targets){
+      const vals = [om[ts], metno[ts], owm[ts]]
+        .filter(v => typeof v === 'number' && isFinite(v));
+      if (vals.length && vals.length < 2) {
+        console.warn('Low source count for', ts, '→ using', vals.length, 'provider(s)');
+      }
+      if (vals.length) out[ts] = vals.reduce((a,b)=>a+b,0) / vals.length;
+    }
     return out;
   }
   function addDays(d, n){ const x=new Date(d); x.setDate(x.getDate()+n); return x; }
@@ -365,6 +386,145 @@ async function fetchSquamishCloudCover(timezone, days){
   }
   return out;
 }
+
+// ---- Open-Meteo (hourly, native TZ) ----
+async function fetchOM(lat, lon, timezone, days){
+  const start_date = toYMD(new Date());
+  const end_date   = toYMD(addDays(new Date(), days));
+  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  url.search = new URLSearchParams({
+    latitude: lat, longitude: lon,
+    hourly: 'temperature_2m',
+    timezone, start_date, end_date
+  }).toString();
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(`Open-Meteo ${r.status}`);
+  const j = await r.json();
+  const out = {};
+  const t = j.hourly.time, v = j.hourly.temperature_2m;
+  for(let i=0;i<t.length;i++) out[t[i]] = v[i];
+  return out; // local 'YYYY-MM-DDTHH:00'
+}
+
+// ---- MET Norway (hourly UTC -> convert to local) ----
+async function fetchMetNo(lat, lon, timezone, days){
+  const until = addDays(new Date(), days);
+  const url = new URL('https://api.met.no/weatherapi/locationforecast/2.0/compact');
+  url.search = new URLSearchParams({ lat, lon }).toString();
+  const r = await fetch(url, {
+    headers: { 'User-Agent': 'squamish-wind-demo/1.0 hello@example.com' } // met.no requires identification
+  });
+  if(!r.ok) throw new Error(`met.no ${r.status}`);
+  const j = await r.json();
+  const out = {};
+  const rows = j?.properties?.timeseries || [];
+  for (const row of rows){
+    const utcIso = row.time; // e.g., '2025-09-19T12:00:00Z'
+    const d = new Date(utcIso);
+    if (d > until) break;
+    const temp = row?.data?.instant?.details?.air_temperature;
+    if (typeof temp !== 'number') continue;
+    const local = toLocalStamp(d, timezone); // 'YYYY-MM-DDTHH:00'
+    out[local] = temp;
+  }
+  return out;
+}
+
+// ---- OpenWeatherMap (3h UTC -> interpolate to hourly, convert to local) ----
+async function fetchOWM(lat, lon, timezone, days){
+  const url = new URL('https://api.openweathermap.org/data/2.5/forecast');
+  url.search = new URLSearchParams({
+    lat, lon, appid: OWM, units: 'metric'
+  }).toString();
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(`OWM ${r.status}`);
+  const j = await r.json();
+  const list = j?.list || []; // 3-hourly
+  // Build arrays in UTC
+  const pts = list.map(x => ({ t: new Date(x.dt * 1000), v: x?.main?.temp })).filter(x => typeof x.v === 'number');
+  // Interpolate to our local target stamps
+  const targets = requestedLocalStamps(timezone, days);
+  const out = {};
+  for (const ts of targets){
+    const dLocal = new Date(ts); // WARNING: this interprets as local system; we need exact local in TZ
+    const d = fromLocalStampToUTC(ts, timezone); // Date in UTC matching that local stamp
+    const v = interp(pts, d);
+    if (v!=null) out[ts] = v;
+  }
+  return out;
+  // Linear interpolation helper (UTC Date target)
+  function interp(points, target){
+    if (points.length === 0) return null;
+    // find neighbors around target
+    let prev = null, next = null;
+    for (const p of points){
+      if (p.t <= target) prev = p;
+      if (p.t >= target){ next = p; break; }
+    }
+    if (!prev) return points[0].v;
+    if (!next) return points[points.length-1].v;
+    if (prev.t.getTime() === next.t.getTime()) return prev.v;
+    const t = (target - prev.t) / (next.t - prev.t);
+    return prev.v + (next.v - prev.v)*t;
+  }
+}
+
+
+// Format a Date 'd' as 'YYYY-MM-DDTHH:00' in the given IANA timezone
+function toLocalStamp(d, tz){
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit', hour12:false
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(d).map(p=>[p.type,p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:00`;
+}
+
+// Given a local stamp 'YYYY-MM-DDTHH:00' in TZ, produce a UTC Date
+function fromLocalStampToUTC(localStamp, tz){
+  // parse components
+  const [ymd, hm] = localStamp.split('T');
+  const [y,m,d] = ymd.split('-').map(Number);
+  const [H] = hm.split(':').map(Number);
+  // get the instant that has that local wall time in tz
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12:false, year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit'
+  });
+  // Build a Date by binary searching the epoch that formats to the desired local
+  // (simple & robust; runs only for a handful of targets)
+  const target = `${String(m).padStart(2,'0')}/${String(d).padStart(2,'0')}/${y}, ${String(H).padStart(2,'0')}:00`;
+  let lo = Date.UTC(y, m-1, d, H) - 36e5, hi = Date.UTC(y, m-1, d, H) + 36e5;
+  for (let i=0;i<20;i++){
+    const mid = new Date((lo+hi)/2);
+    const parts = Object.fromEntries(dtf.formatToParts(mid).map(p=>[p.type,p.value]));
+    const cur = `${parts.month}/${parts.day}/${parts.year}, ${parts.hour}:${parts.minute}`;
+    if (cur < target) lo = mid.getTime(); else hi = mid.getTime();
+  }
+  return new Date(hi);
+}
+
+// Convert a naive local string 'YYYY-MM-DDTHH:MM:SS' (assumed local to site) into our TZ stamp
+function toTZStampFromNaive(localIso, tz){
+  const [ymd, hms] = localIso.split('T');
+  const [y,m,d] = ymd.split('-').map(Number);
+  const [H,Min] = hms.split(':').map(Number);
+  const dtf = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit', hour12:false
+  });
+  // find UTC instant that formats to this local time in tz
+  const utc = fromLocalStampToUTC(`${ymd}T${String(H).padStart(2,'0')}:00`, tz);
+  const parts = Object.fromEntries(dtf.formatToParts(utc).map(p=>[p.type,p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:00`;
+}
+
+function withTimeout(promise, ms=6000){
+  const t = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));
+  return Promise.race([promise, t]);
+}
+
+
 
 
 })();
