@@ -9,6 +9,8 @@ body {
     font-style: normal;
     font-size: 16px;
     line-height: 1.45;
+    overflow-x: hidden;
+    max-width: 100vw;
 }
 
 :root {
@@ -34,6 +36,8 @@ body {
     max-width: 960px;
     margin: 20px auto;
     padding: 0 12px 28px;
+    box-sizing: border-box;
+    width: 100%;
 }
 
 h1 {
@@ -64,6 +68,8 @@ p {
     width: 100%;
     background: var(--card);
     padding: 24px;
+    box-sizing: border-box;
+    max-width: 100%;
 }
 
 .top {
@@ -101,6 +107,7 @@ p {
 
 /* Day % badge (color by value) */
 .badge {
+    position: relative; /* for tooltip */
     font-weight: 700;
     font-size: 24px;
     padding: 4px 8px;
@@ -112,6 +119,53 @@ p {
 .badge.yellow { color: var(--yellow); }
 .badge.orange { color: var(--orange); }
 .badge.red    { color: var(--red); }
+
+/* Tooltip for badge */
+.badge::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+  transform: translateY(-6px);
+  background: var(--tip-bg);
+  color: var(--tip-fg);
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  white-space: pre;
+  text-align: left;
+  box-shadow: 0 2px 6px rgba(0,0,0,.15);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 10;
+  transition: opacity .15s ease, transform .15s ease;
+  font-weight: 400;
+  font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+  line-height: 1.5;
+}
+
+.badge::before {
+  content: "";
+  position: absolute;
+  bottom: calc(100% - 1px);
+  right: 12px;
+  border-width: 6px;
+  border-style: solid;
+  border-color: var(--tip-bg) transparent transparent transparent;
+  opacity: 0;
+  z-index: 10;
+  transition: opacity .15s ease;
+}
+
+/* Desktop hover behavior */
+@media (hover:hover){
+  .badge:hover::after { opacity: 1; transform: translateY(-8px); }
+  .badge:hover::before { opacity: 1; }
+}
+
+/* Mobile tap behavior */
+.badge.show-tip::after { opacity: 1; transform: translateY(-8px); }
+.badge.show-tip::before { opacity: 1; }
 
 /* Single-row grid: 8 → 20 (13 cells) */
 .cells {
@@ -182,10 +236,15 @@ p {
     transition: opacity .15s ease;
 }
 
+/* Desktop hover behavior */
 @media (hover:hover){
   .cell:hover::after { opacity: 1; transform: translateX(-50%) translateY(-8px); }
   .cell:hover::before { opacity: 1; }
 }
+
+/* Mobile tap behavior */
+.cell.show-tip::after { opacity: 1; transform: translateX(-50%) translateY(-8px); }
+.cell.show-tip::before { opacity: 1; }
 
 /* Hour labels */
 .hours {
@@ -239,7 +298,12 @@ p {
   transition: opacity .15s ease;
 }
 
+/* Desktop hover behavior */
 @media (hover:hover){
   .day .wx:hover::after { opacity: 1; transform: translateX(-50%) translateY(-8px); }
   .day .wx:hover::before { opacity: 1; }
 }
+
+/* Mobile tap behavior */
+.day .wx.show-tip::after { opacity: 1; transform: translateX(-50%) translateY(-8px); }
+.day .wx.show-tip::before { opacity: 1; }

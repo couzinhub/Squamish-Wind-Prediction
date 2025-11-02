@@ -39,6 +39,18 @@
   const HORIZON_DAYS = 8;
 
   const AQ_FORECAST_LIMIT_DAYS = 10; // Open-Meteo AQ forecast horizon
+
+  // Atmospheric constants
+  const ELEVATION_850MB = 1500;      // meters - 850mb pressure level elevation
+  const STANDARD_LAPSE = 6.5;        // °C per 1000m - standard atmospheric lapse rate
+  const INSTABILITY_MAX = 15;        // max +/- percentage points from instability
+  const INSTABILITY_MULTIPLIER = 3;  // converts lapse rate deviation to points
+
+  // Display constants
+  const CLOUD_PENALTY_MAX = 20;      // max percentage points penalty for overcast
+  const SMOKE_WARNING_THRESHOLD = 30; // PM2.5 µg/m³ threshold for smoke warning
+  const API_TIMEOUT_MS = 6000;       // timeout for API requests
+  const MIN_SOURCE_COUNT_WARN = 2;   // warn if fewer than this many sources available
   
 
   const colEl = document.getElementById('col');
@@ -74,23 +86,65 @@
 
   // ===== Fetch & render =====
   try{
-    const [van, lil, squWx, squAQ, squCC] = await Promise.all([
-      fetchHourlyAveraged(VANCOUVER.lat, VANCOUVER.lon, TZ, HORIZON_DAYS),
-      fetchHourlyAveraged(LILLOOET.lat,  LILLOOET.lon,  TZ, HORIZON_DAYS),
-
-    fetchSquamishDaily(TZ, HORIZON_DAYS),        // date -> WMO weather code
-      fetchSquamishAQ(TZ, HORIZON_DAYS),            // date -> pm2.5 (µg/m³) daytime max
-      fetchSquamishCloudCover(TZ, HORIZON_DAYS)    // date -> avg cloudcover% (11–18)
+    // Fetch all data with individual error handling to allow partial failures
+    const [van, lil, van850, lil850, squWx, squAQ, squCC] = await Promise.all([
+      fetchHourlyAveraged(VANCOUVER.lat, VANCOUVER.lon, TZ, HORIZON_DAYS).catch(e => {
+        console.error('Vancouver temp fetch failed:', e);
+        return {};
+      }),
+      fetchHourlyAveraged(LILLOOET.lat,  LILLOOET.lon,  TZ, HORIZON_DAYS).catch(e => {
+        console.error('Lillooet temp fetch failed:', e);
+        return {};
+      }),
+      fetch850mbTemp(VANCOUVER.lat, VANCOUVER.lon, TZ, HORIZON_DAYS).catch(e => {
+        console.warn('Vancouver 850mb fetch failed (instability will be neutral):', e);
+        return {};
+      }),
+      fetch850mbTemp(LILLOOET.lat,  LILLOOET.lon,  TZ, HORIZON_DAYS).catch(e => {
+        console.warn('Lillooet 850mb fetch failed (instability will be neutral):', e);
+        return {};
+      }),
+      fetchSquamishDaily(TZ, HORIZON_DAYS).catch(e => {
+        console.warn('Squamish weather icons fetch failed:', e);
+        return {};
+      }),
+      fetchSquamishAQ(TZ, HORIZON_DAYS).catch(e => {
+        console.warn('Air quality fetch failed:', e);
+        return {};
+      }),
+      fetchSquamishCloudCover(TZ, HORIZON_DAYS).catch(e => {
+        console.warn('Cloud cover fetch failed:', e);
+        return {};
+      })
     ]);
-    const perDay = buildDays(van, lil, squWx, squAQ, squCC);
+
+    // Check if we have minimum required data
+    if (Object.keys(van).length === 0 && Object.keys(lil).length === 0) {
+      throw new Error('Failed to fetch temperature data from all sources');
+    }
+
+    const perDay = buildDays(van, lil, van850, lil850, squWx, squAQ, squCC);
+
+    if (perDay.length === 0) {
+      throw new Error('No forecast data available');
+    }
+
     render(perDay);
   } catch(e){
-    console.error(e);
-    colEl.innerHTML = `<div style="color:#b91c1c">Error: ${e.message}</div>`;
+    console.error('Fatal error:', e);
+    colEl.innerHTML = `<div style="color:#b91c1c;padding:20px;text-align:center;">
+      <strong>Unable to load forecast</strong><br>
+      ${e.message}<br>
+      <small>Check console for details</small>
+    </div>`;
   }
 
-  // ----- Fetch hourly temps -----
-  // Build the exact local timestamps we care about: today..+days, 08..20 local
+  /**
+   * Build array of local timestamp strings for forecast period
+   * @param {string} timezone - IANA timezone string
+   * @param {number} days - Number of days to forecast
+   * @returns {string[]} Array of 'YYYY-MM-DDTHH:00' timestamps
+   */
   function requestedLocalStamps(timezone, days){
     const want = [];
     const start = new Date(); // now
@@ -105,6 +159,14 @@
     return want; // array of 'YYYY-MM-DDTHH:00' in local tz
   }
 
+  /**
+   * Fetch and average hourly temperatures from multiple weather sources
+   * @param {number} lat - Latitude
+   * @param {number} lon - Longitude
+   * @param {string} timezone - IANA timezone
+   * @param {number} days - Forecast horizon
+   * @returns {Promise<Object>} Map of timestamp -> averaged temperature in °C
+   */
   async function fetchHourlyAveraged(lat, lon, timezone, days){
     const targets = requestedLocalStamps(timezone, days);
     // Kick all sources in parallel and fail-soft (empty maps if one fails)
@@ -118,7 +180,7 @@
     for (const ts of targets){
       const vals = [om[ts], metno[ts], owm[ts]]
         .filter(v => typeof v === 'number' && isFinite(v));
-      if (vals.length && vals.length < 2) {
+      if (vals.length && vals.length < MIN_SOURCE_COUNT_WARN) {
         console.warn('Low source count for', ts, '→ using', vals.length, 'provider(s)');
       }
       if (vals.length) out[ts] = vals.reduce((a,b)=>a+b,0) / vals.length;
@@ -131,7 +193,11 @@
       .format(d).replaceAll('/','-');
   }
 
-  // ----- Model: ΔT → % -----
+  /**
+   * Convert temperature delta to wind probability percentage
+   * @param {number|null} delta - Temperature difference in °C
+   * @returns {number|null} Percentage (0-100) or null
+   */
   function pctFromDelta(delta){
     if (delta==null || Number.isNaN(delta)) return null;
     if (delta <= MIN_DELTA) return 0;
@@ -148,8 +214,41 @@
     return 'red';
   }
 
-  // ----- Build per-day structures -----
-  function buildDays(van, lil, squWx, squAQ, squCC){
+  /**
+   * Calculate atmospheric instability modifier based on lapse rate
+   * @param {number|null} surfaceTemp - Surface temperature in °C
+   * @param {number|null} temp850mb - Temperature at 850mb pressure level in °C
+   * @returns {number} Modifier in percentage points (+/- INSTABILITY_MAX)
+   *
+   * Strong unstable atmosphere (steep lapse rate) = better thermal mixing = bonus
+   * Stable atmosphere (weak lapse rate or inversion) = thermal suppression = penalty
+   */
+  function calcInstabilityModifier(surfaceTemp, temp850mb){
+    if (surfaceTemp == null || temp850mb == null) return 0; // neutral if missing data
+
+    const expectedDrop = (ELEVATION_850MB / 1000) * STANDARD_LAPSE; // ~9.75°C
+    const actualDrop = surfaceTemp - temp850mb;
+    const deviation = actualDrop - expectedDrop;
+
+    // actualDrop > expectedDrop = steeper lapse = more unstable = good for thermals
+    // actualDrop < expectedDrop = weaker lapse = more stable = bad for thermals
+    const modifier = Math.max(-INSTABILITY_MAX, Math.min(INSTABILITY_MAX, deviation * INSTABILITY_MULTIPLIER));
+
+    return modifier;
+  }
+
+  /**
+   * Build daily forecast objects from all fetched weather data
+   * @param {Object} van - Vancouver temperature map
+   * @param {Object} lil - Lillooet temperature map
+   * @param {Object} van850 - Vancouver 850mb temperature map
+   * @param {Object} lil850 - Lillooet 850mb temperature map
+   * @param {Object} squWx - Squamish WMO weather codes
+   * @param {Object} squAQ - Squamish air quality (PM2.5)
+   * @param {Object} squCC - Squamish cloud cover
+   * @returns {Array} Array of day objects with cells and metrics
+   */
+  function buildDays(van, lil, van850, lil850, squWx, squAQ, squCC){
     const dates = new Set([...Object.keys(van), ...Object.keys(lil)].map(s=>s.slice(0,10)));
     const sorted = [...dates].sort();
     const today = toYMD(new Date());
@@ -158,30 +257,132 @@
     return nextN.map(dateStr=>{
       const cells = [];            // 13 hours
       const evalPcts = [];         // for 11..18 daily%
+      const instabilities = [];    // for daily avg instability
+
       for (const h of HOURS){
         const ts = `${dateStr}T${String(h).padStart(2,'0')}:00`;
         const tv = van[ts], tl = lil[ts];
+        const tv850 = van850?.[ts], tl850 = lil850?.[ts];
         const rawDelta = (typeof tv==='number' && typeof tl==='number') ? (tl - tv) : null; // Lillooet − Vancouver
+
+        // Calculate atmospheric instability at both locations and average
+        const vanInstability = calcInstabilityModifier(tv, tv850);
+        const lilInstability = calcInstabilityModifier(tl, tl850);
+        const avgInstability = (vanInstability + lilInstability) / 2;
 
         // Apply hour-based divisor to the delta BEFORE mapping to %
         const divisor = HOUR_DIVISOR[h] ?? 1;
         const adjustedDelta = (rawDelta==null) ? null : (rawDelta / divisor);
 
         const pct = pctFromDelta(adjustedDelta);
-        cells.push({ hour:h, pct, delta:rawDelta, adj:adjustedDelta, tv, tl }); // add adjusted ΔT for coloring
+        cells.push({ hour:h, pct, delta:rawDelta, adj:adjustedDelta, tv, tl, instability: avgInstability }); // add adjusted ΔT for coloring
 
-        if (h>=EVAL_START && h<=EVAL_END && pct!=null) evalPcts.push(pct);
+        if (h>=EVAL_START && h<=EVAL_END && pct!=null) {
+          evalPcts.push(pct);
+          instabilities.push(avgInstability);
+        }
       }
       const dayPct = evalPcts.length ? Math.round(evalPcts.reduce((a,b)=>a+b,0)/evalPcts.length) : null;
+      const avgInstability = instabilities.length ? instabilities.reduce((a,b)=>a+b,0)/instabilities.length : 0;
+
       const wmo  = squWx?.[dateStr] ?? null;
       const pm25 = squAQ?.[dateStr] ?? null;
       const cloud = squCC?.[dateStr] ?? null; // average cloudcover% (11–18)
-      const smokeRisk = (pm25==null) ? null : smokeRiskFromPM25(pm25); // %
-      return { dateStr, cells, dayPct, wmo, pm25, smokeRisk, cloud };
+      return { dateStr, cells, dayPct, wmo, pm25, cloud, instability: avgInstability };
     });
   }
 
-  // ----- Render -----
+  /**
+   * Build tooltip text for the daily percentage badge
+   * @param {number} basePct - Base prediction percentage
+   * @param {number} cloudPenalty - Cloud cover penalty
+   * @param {number} instabilityBonus - Atmospheric instability modifier
+   * @param {number} finalPct - Final calculated percentage
+   * @returns {string} Formatted tooltip text
+   */
+  function buildBadgeTooltip(basePct, cloudPenalty, instabilityBonus, finalPct){
+    const basePctStr = String(basePct).padStart(3);
+    const cloudLineStr = (cloudPenalty > 0 ? `-${cloudPenalty}` : ` ${cloudPenalty}`).padStart(3);
+    const stabilityLineStr = (instabilityBonus >= 0 ? `+${instabilityBonus}` : `${instabilityBonus}`).padStart(3);
+    const finalPctStr = String(finalPct).padStart(3);
+
+    return `Base prediction   ${basePctStr}%
+Cloud cover       ${cloudLineStr} pts
+Atmosphere        ${stabilityLineStr} pts
+FINAL SCORE       ${finalPctStr}%`;
+  }
+
+  /**
+   * Create the top section of a day card with label, weather icon, and percentage badge
+   */
+  function createDayCardTop(day, idx, todayStr, displayPct, cloudPenalty, instabilityBonus){
+    const top = document.createElement('div');
+    top.className = 'top';
+
+    const dayLabel = (idx === 0) ? 'Today'
+                    : (idx === 1) ? 'Tomorrow'
+                    : formatDay(day.dateStr);
+    const isToday = (day.dateStr === todayStr);
+    const smokeWarn = (isToday && day.pm25 != null && day.pm25 >= SMOKE_WARNING_THRESHOLD);
+
+    const badgeTooltip = day.dayPct == null ? '' :
+      buildBadgeTooltip(day.dayPct, cloudPenalty, instabilityBonus, displayPct);
+
+    top.innerHTML = `
+      <div class="day">
+          ${dayLabel}
+          ${day.wmo!=null
+             ? `<span class="wx" data-tip="Cloud cover avg: ${day.cloud!=null ? Math.round(day.cloud) : '—'}%">${iconForWMO(day.wmo)}</span>`
+             : ''}
+          ${smokeWarn
+            ? `<span class="smoke-warn" title="PM2.5 ~ ${day.pm25.toFixed(1)} µg/m³">🔥 fire smoke</span>`
+            : ''}
+       </div>
+       <div class="badge ${badgeClass(displayPct)}" ${displayPct != null ? `data-tip="${badgeTooltip}"` : ''}>${displayPct==null ? '—' : (displayPct + '%')}</div>
+     `;
+
+    return top;
+  }
+
+  /**
+   * Create the hourly cells grid showing temperature deltas
+   */
+  function createHourlyCells(dayCells){
+    const cells = document.createElement('div');
+    cells.className = 'cells';
+
+    dayCells.forEach(c=>{
+      const div = document.createElement('div');
+      const deltaTxt = (c.delta==null) ? '—' : `${Math.round(c.delta)}°`;
+      div.className = 'cell';
+      div.style.background = cellBgForDelta(c.adj);
+
+      const tip = `Vancouver: ${fmtTemp(c.tv)}
+Lillooet: ${fmtTemp(c.tl)}`;
+      div.setAttribute('data-tip', tip);
+      div.innerHTML = `<small>${deltaTxt}</small>`;
+      cells.appendChild(div);
+    });
+
+    return cells;
+  }
+
+  /**
+   * Create the hour labels row
+   */
+  function createHourLabels(dayCells){
+    const hrs = document.createElement('div');
+    hrs.className = 'hours';
+    dayCells.forEach(c=>{
+      hrs.innerHTML += `<span>${hourLabel(c.hour)}</span>`;
+    });
+    return hrs;
+  }
+
+  /**
+   * Render the forecast days into the DOM
+   * @param {Array} days - Array of day objects from buildDays
+   */
   function render(days){
     colEl.textContent = '';
     const frag = document.createDocumentFragment();
@@ -191,49 +392,14 @@
       const card = document.createElement('div');
       card.className = 'card';
 
-      const top = document.createElement('div');
-      top.className = 'top';
-      const dayLabel = (idx === 0) ? 'Today'
-                      : (idx === 1) ? 'Tomorrow'
-                      : formatDay(day.dateStr);
-      const isToday   = (day.dateStr === todayStr);
-      const smokeWarn = (isToday && day.pm25 != null && day.pm25 >= 30); // visual only
-      const overcast  = (day.cloud == null) ? 0 : Math.max(0, Math.min(100, day.cloud)); // 0..100
-      const penalty   = Math.round((overcast / 100) * 20); // up to -20 points
-      const displayPct = (day.dayPct == null) ? null : Math.max(0, day.dayPct - penalty);
-      top.innerHTML = `
-        <div class="day">
-            ${dayLabel}
-            ${day.wmo!=null
-               ? `<span class="wx" data-tip="Cloud cover avg: ${day.cloud!=null ? Math.round(day.cloud) : '—'}%">${iconForWMO(day.wmo)}</span>`
-               : ''}
-            ${smokeWarn
-              ? `<span class="smoke-warn" title="PM2.5 ~ ${day.pm25.toFixed(1)} µg/m³">🔥 fire smoke</span>`
-              : ''}
-         </div>
-         <div class="badge ${badgeClass(displayPct)}">${displayPct==null ? '—' : (displayPct + '%')}</div>
-       `;
+      const overcast = (day.cloud == null) ? 0 : Math.max(0, Math.min(100, day.cloud));
+      const cloudPenalty = Math.round((overcast / 100) * CLOUD_PENALTY_MAX);
+      const instabilityBonus = Math.round(day.instability ?? 0);
+      const displayPct = (day.dayPct == null) ? null : Math.max(0, Math.min(100, day.dayPct - cloudPenalty + instabilityBonus));
 
-      const cells = document.createElement('div');
-      cells.className = 'cells';
-      day.cells.forEach(c=>{
-        const div = document.createElement('div');
-        const deltaTxt = (c.delta==null) ? '—' : `${Math.round(c.delta)}°`;
-        div.className = 'cell';
-        div.style.background = cellBgForDelta(c.adj);
-        // custom tooltip
-        const tip = `Vancouver: ${fmtTemp(c.tv)}
-Lillooet: ${fmtTemp(c.tl)}`;
-        div.setAttribute('data-tip', tip);
-        div.innerHTML = `<small>${deltaTxt}</small>`;
-        cells.appendChild(div);
-      });
-
-      const hrs = document.createElement('div');
-      hrs.className = 'hours';
-      day.cells.forEach(c=>{
-        hrs.innerHTML += `<span>${hourLabel(c.hour)}</span>`;
-      });
+      const top = createDayCardTop(day, idx, todayStr, displayPct, cloudPenalty, instabilityBonus);
+      const cells = createHourlyCells(day.cells);
+      const hrs = createHourLabels(day.cells);
 
       card.appendChild(top);
       card.appendChild(cells);
@@ -315,27 +481,7 @@ async function fetchSquamishAQ(timezone, days){
 }
 
 
-function clamp01(x){ return Math.max(0, Math.min(1, x)); }
-function smokeRiskFromPM25(pm){ // simple linear 0→150 µg/m³ → 0–100%
-  if (pm==null || !isFinite(pm)) return null;
-  const p = clamp01(pm / 150);
-  return Math.round(p * 100);
-}
-
-// WMO → label + emoji (compact set)
-function weatherNameForWMO(code){
-  if (code==null) return '—';
-  const c = Number(code);
-  if (c===0) return 'Clear';
-  if ([1,2].includes(c)) return 'Partly cloudy';
-  if (c===3) return 'Overcast';
-  if ([45,48].includes(c)) return 'Fog';
-  if ([51,53,55,56,57,61,63,65,66,67].includes(c)) return 'Rain';
-  if ([71,73,75,77].includes(c)) return 'Snow';
-  if ([80,81,82].includes(c)) return 'Showers';
-  if ([95,96,99].includes(c)) return 'Thunderstorm';
-  return 'Mixed';
-}
+// WMO weather code to emoji icon
 function iconForWMO(code){
   if (code==null) return '·';
   const c = Number(code);
@@ -406,6 +552,32 @@ async function fetchOM(lat, lon, timezone, days){
   return out; // local 'YYYY-MM-DDTHH:00'
 }
 
+/**
+ * Fetch 850mb (upper atmosphere) temperature data
+ * @param {number} lat - Latitude
+ * @param {number} lon - Longitude
+ * @param {string} timezone - IANA timezone
+ * @param {number} days - Forecast horizon
+ * @returns {Promise<Object>} Map of timestamp -> temperature at 850mb in °C
+ */
+async function fetch850mbTemp(lat, lon, timezone, days){
+  const start_date = toYMD(new Date());
+  const end_date   = toYMD(addDays(new Date(), days));
+  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  url.search = new URLSearchParams({
+    latitude: lat, longitude: lon,
+    hourly: 'temperature_850hPa', // 850mb level (~5000ft / 1500m)
+    timezone, start_date, end_date
+  }).toString();
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(`Open-Meteo 850mb ${r.status}`);
+  const j = await r.json();
+  const out = {};
+  const t = j.hourly.time, v = j.hourly.temperature_850hPa;
+  for(let i=0;i<t.length;i++) out[t[i]] = v[i];
+  return out; // local 'YYYY-MM-DDTHH:00' -> temp in °C
+}
+
 // ---- MET Norway (hourly UTC -> convert to local) ----
 async function fetchMetNo(lat, lon, timezone, days){
   const until = addDays(new Date(), days);
@@ -470,7 +642,12 @@ async function fetchOWM(lat, lon, timezone, days){
 }
 
 
-// Format a Date 'd' as 'YYYY-MM-DDTHH:00' in the given IANA timezone
+/**
+ * Format a Date as 'YYYY-MM-DDTHH:00' in the given IANA timezone
+ * @param {Date} d - Date object
+ * @param {string} tz - IANA timezone string
+ * @returns {string} Local timestamp string
+ */
 function toLocalStamp(d, tz){
   const fmt = new Intl.DateTimeFormat('en-CA', {
     timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit',
@@ -480,7 +657,12 @@ function toLocalStamp(d, tz){
   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:00`;
 }
 
-// Given a local stamp 'YYYY-MM-DDTHH:00' in TZ, produce a UTC Date
+/**
+ * Convert local timestamp string in a timezone to UTC Date object
+ * @param {string} localStamp - Local timestamp 'YYYY-MM-DDTHH:00'
+ * @param {string} tz - IANA timezone string
+ * @returns {Date} UTC Date object
+ */
 function fromLocalStampToUTC(localStamp, tz){
   // parse components
   const [ymd, hm] = localStamp.split('T');
@@ -504,28 +686,42 @@ function fromLocalStampToUTC(localStamp, tz){
   return new Date(hi);
 }
 
-// Convert a naive local string 'YYYY-MM-DDTHH:MM:SS' (assumed local to site) into our TZ stamp
-function toTZStampFromNaive(localIso, tz){
-  const [ymd, hms] = localIso.split('T');
-  const [y,m,d] = ymd.split('-').map(Number);
-  const [H,Min] = hms.split(':').map(Number);
-  const dtf = new Intl.DateTimeFormat('en-CA', {
-    timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit',
-    hour:'2-digit', minute:'2-digit', hour12:false
-  });
-  // find UTC instant that formats to this local time in tz
-  const utc = fromLocalStampToUTC(`${ymd}T${String(H).padStart(2,'0')}:00`, tz);
-  const parts = Object.fromEntries(dtf.formatToParts(utc).map(p=>[p.type,p.value]));
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:00`;
-}
-
-function withTimeout(promise, ms=6000){
+function withTimeout(promise, ms=API_TIMEOUT_MS){
   const t = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));
   return Promise.race([promise, t]);
 }
 
+// Mobile tooltip support - toggle on tap
+document.addEventListener('click', function(e) {
+  const target = e.target;
 
+  // Check if clicking on an element with data-tip attribute
+  if (target.hasAttribute('data-tip') || target.classList.contains('wx') || target.classList.contains('badge')) {
+    // Find the actual tooltip element (might be the target or a parent)
+    const tipEl = target.hasAttribute('data-tip') ? target :
+                  target.closest('[data-tip]');
 
+    if (tipEl && tipEl.hasAttribute('data-tip')) {
+      // On mobile, toggle the show-tip class
+      if (window.matchMedia('(hover: none)').matches) {
+        e.preventDefault();
+
+        // Close all other tooltips
+        document.querySelectorAll('.show-tip').forEach(el => {
+          if (el !== tipEl) el.classList.remove('show-tip');
+        });
+
+        // Toggle this tooltip
+        tipEl.classList.toggle('show-tip');
+      }
+    }
+  } else {
+    // Clicked outside - close all tooltips
+    document.querySelectorAll('.show-tip').forEach(el => {
+      el.classList.remove('show-tip');
+    });
+  }
+});
 
 })();
 </script>
